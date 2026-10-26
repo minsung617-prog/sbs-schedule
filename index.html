@@ -6,6 +6,7 @@
 <title>SBS컴퓨터아트학원 안산점 — 개강안내</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;500;700;900&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <style>
 :root{
   --bg:#f8faff;
@@ -366,11 +367,86 @@ function handleFile(file){
   if(!file)return;setStatus('⏳ 읽는 중...','');
   const r=new FileReader();
   r.onload=e=>{
-    try{const text=new TextDecoder('utf-8').decode(new Uint8Array(e.target.result));
+    try{
+      const bytes=new Uint8Array(e.target.result);
+      const isZip=bytes[0]===0x50&&bytes[1]===0x4B; // 'PK' — real .xlsx(zip) 파일
+      if(isZip){parseXLSXFile(e.target.result,file.name);return;}
+      const text=new TextDecoder('utf-8').decode(bytes);
       if(text.includes('전체출석율'))parseSBS(text,file.name);
       else setStatus('❌ 지원하지 않는 형식입니다.','err');
     }catch(err){setStatus('❌ 오류: '+err.message,'err');}
   };r.readAsArrayBuffer(file);
+}
+function parseXLSXFile(buf,filename){
+  if(typeof XLSX==='undefined'){setStatus('❌ 엑셀 라이브러리를 불러오지 못했습니다. 인터넷 연결을 확인해주세요.','err');return;}
+  const wb=XLSX.read(buf,{type:'array'});
+  const ws=wb.Sheets[wb.SheetNames[0]];
+  if(!ws||!ws['!ref']){setStatus('❌ 지원하지 않는 형식입니다.','err');return;}
+  const ref=XLSX.utils.decode_range(ws['!ref']);
+  const merges=ws['!merges']||[];
+  const cellVal=(r,c)=>{const cell=ws[XLSX.utils.encode_cell({r,c})];return cell&&cell.v!=null?String(cell.v).trim():'';};
+  const headerRow=ref.s.r;
+
+  // 헤더행(강의장 라벨, 병합셀=colspan)으로 컬럼→강의장 매핑 구성
+  const col2room=['TIME'];
+  let c=ref.s.c+1;
+  while(c<=ref.e.c){
+    const label=cellVal(headerRow,c);
+    if(!label){col2room[c]=col2room[c-1]||'';c++;continue;}
+    const m=merges.find(mm=>mm.s.r===headerRow&&mm.s.c===c);
+    const span=m?(m.e.c-m.s.c+1):1;
+    const room=/^[A-Z]$/.test(label)?label+'강의장':label;
+    for(let i=0;i<span;i++)col2room[c+i]=room;
+    c+=span;
+  }
+
+  const parsed=[];
+  for(let r=headerRow+1;r<=ref.e.r;r++){
+    const timeStr=cellVal(r,ref.s.c);
+    if(!/^\d{1,2}:\d{2}$/.test(timeStr))continue;
+    for(let col=ref.s.c+1;col<=ref.e.c;col++){
+      const val=cellVal(r,col);
+      if(!val)continue;
+      const m=merges.find(mm=>mm.s.r===r&&mm.s.c===col);
+      const rowSpan=m?(m.e.r-m.s.r+1):1;
+      const lines=val.split(/\r?\n/).map(s=>s.trim()).filter(Boolean);
+      const subject=lines[0]||'';
+      const room=col2room[col]||'?';
+      let teacher='';
+      if(lines[1]){
+        const parts=lines[1].split('|').map(s=>s.trim());
+        if(parts[1])teacher=parts[1].replace(/\d+$/,'')+'강사';
+      }
+      const getField=label=>{const line=lines.find(l=>l.startsWith(label));return line?line.slice(label.length).trim():'';};
+      const fmtDate=d=>{const p=d.split('-');return p.length===3?p[1]+'.'+p[2]:d;};
+      const days=getField('요일:');
+      const [sh,smn]=timeStr.split(':').map(Number);
+      const tot=sh*60+smn+rowSpan*30;
+      const timeEnd=String(Math.floor(tot/60)).padStart(2,'0')+':'+String(tot%60).padStart(2,'0');
+      parsed.push({
+        id:nextId++,subject,teacher,days,
+        isWeekend:/토|일/.test(days),
+        startDate:getField('개강일:')?fmtDate(getField('개강일:')):'',
+        endDate:getField('종강일:')?fmtDate(getField('종강일:')):'',
+        timeStart:timeStr,timeEnd,room,supplies:'X',
+        isOnline:room.includes('비대면')?'비대면':'대면'
+      });
+    }
+  }
+  if(!parsed.length){setStatus('❌ 지원하지 않는 형식입니다.','err');return;}
+  commitParsed(parsed,filename);
+}
+function commitParsed(parsed,filename){
+  const mon=[...new Set(parsed.map(c=>c.startDate.split('.')[0]).filter(Boolean))];
+  const ml=mon.length?mon[0]+'월':'?월';
+  const wd=parsed.filter(c=>!c.isWeekend),we=parsed.filter(c=>c.isWeekend);
+  const wdId='wd_'+ml,weId='we_'+ml;
+  tabs=tabs.filter(t=>t.id!==wdId&&t.id!==weId);
+  if(wd.length)tabs.push({id:wdId,label:ml+' 평일반',icon:'📅',courses:wd});
+  if(we.length)tabs.push({id:weId,label:ml+' 주말반',icon:'🗓️',courses:we});
+  activeTab=tabs[0]?.id||activeTab;selected.clear();renderTabs();applyFilters();
+  setStatus(`✅ "${filename}" — 평일 ${wd.length}개 / 주말 ${we.length}개 로드 완료`,'ok');
+  toast(`✅ ${parsed.length}개 강좌 불러오기 완료!`);
 }
 function parseSBS(html,filename){
   const rows=[...html.matchAll(/<tr[^>]*>(.*?)<\/tr>/gs)].map(m=>m[1]);
@@ -407,16 +483,8 @@ function parseSBS(html,filename){
     const isWe=/토|일/.test(days);
     return{id:nextId++,subject,teacher,days,isWeekend:isWe,startDate:sm?fmt(sm[1]):'',endDate:em?fmt(em[1]):'',timeStart:st,timeEnd:et,room:col2room[col]||'?',supplies:'X',isOnline:'대면'};
   });
-  const mon=[...new Set(parsed.map(c=>c.startDate.split('.')[0]).filter(Boolean))];
-  const ml=mon.length?mon[0]+'월':'?월';
-  const wd=parsed.filter(c=>!c.isWeekend),we=parsed.filter(c=>c.isWeekend);
-  const wdId='wd_'+ml,weId='we_'+ml;
-  tabs=tabs.filter(t=>t.id!==wdId&&t.id!==weId);
-  if(wd.length)tabs.push({id:wdId,label:ml+' 평일반',icon:'📅',courses:wd});
-  if(we.length)tabs.push({id:weId,label:ml+' 주말반',icon:'🗓️',courses:we});
-  activeTab=tabs[0]?.id||activeTab;selected.clear();renderTabs();applyFilters();
-  setStatus(`✅ "${filename}" — 평일 ${wd.length}개 / 주말 ${we.length}개 로드 완료`,'ok');
-  toast(`✅ ${parsed.length}개 강좌 불러오기 완료!`);
+  if(!parsed.length){setStatus('❌ 지원하지 않는 형식입니다.','err');return;}
+  commitParsed(parsed,filename);
 }
 function setStatus(msg,cls){const el=document.getElementById('upload-status');el.textContent=msg;el.className='upload-status '+cls;}
 function initDc(){document.getElementById('dc-list').innerHTML=ROOMS.map(r=>`<div class="dc-row"><label>${r}</label><input type="text" id="dc-${r}" value="${DISCORD[r]}"></div>`).join('');}
