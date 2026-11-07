@@ -244,7 +244,7 @@ const DISCORD={
 };
 const ROOMS=Object.keys(DISCORD);
 
-// 강좌 데이터: courses.json (KEG 인트라넷 시간표에서 자동 생성 · tools/courses-build.js)
+// 강좌 데이터: sbs-class 저장소의 courses.json (KEG 인트라넷 시간표에서 자동 생성 · sbs-class/tools/courses-build.js). 실패 시 이 저장소의 courses.json 사용
 let tabs=[];
 let activeTab='',activeRoom='',multiMode=false,selected=new Set(),nextId=1;
 
@@ -277,7 +277,10 @@ function buildTabsFromJson(data){
 function init(){
   initDc();renderTabs();
   document.getElementById('list').innerHTML='<div class="empty"><span class="empty-icon">⏳</span><div class="empty-title">강좌를 불러오는 중…</div></div>';
-  fetch('courses.json?v='+Date.now()).then(r=>r.json()).then(data=>{
+  const COURSES_URL='https://minsung617-prog.github.io/sbs-class/courses.json';
+  fetch(COURSES_URL+'?v='+Date.now()).then(r=>{if(!r.ok)throw 0;return r.json();})
+    .catch(()=>fetch('courses.json?v='+Date.now()).then(r=>r.json()))
+    .then(data=>{
     tabs=buildTabsFromJson(data);activeTab=tabs[0]?tabs[0].id:'';
     setStatus('🔄 인트라넷 시간표 기준 · '+data.updated+' 자동 갱신 (엑셀을 올리면 그 내용으로 탭이 추가됩니다)','ok');
     renderTabs();applyFilters();
